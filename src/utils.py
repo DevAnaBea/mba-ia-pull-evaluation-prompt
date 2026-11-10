@@ -5,11 +5,36 @@ Funções auxiliares para o projeto de otimização de prompts.
 import os
 import yaml
 import json
+import re
+import sys
 from typing import Dict, Any, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
+
+
+def configure_console_encoding() -> None:
+    """Keep Unicode CLI output from crashing on legacy Windows code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def _supports_sampling_parameters(model_name: str) -> bool:
+    """Gemini 3.6+ models deprecate temperature and related sampling options."""
+    model_version = re.match(r'^gemini-(\d+)(?:\.(\d+))?', model_name.lower())
+    return not (
+        model_version
+        and (
+            int(model_version.group(1)) > 3
+            or (
+                int(model_version.group(1)) == 3
+                and int(model_version.group(2) or 0) >= 6
+            )
+        )
+    )
 
 
 def load_yaml(file_path: str) -> Optional[Dict[str, Any]]:
@@ -128,20 +153,23 @@ def validate_prompt_structure(prompt_data: Dict[str, Any]) -> tuple[bool, list]:
     """
     errors = []
 
+    if not isinstance(prompt_data, dict):
+        return False, ["O conteúdo do prompt deve ser um objeto YAML."]
+
     required_fields = ['description', 'system_prompt', 'version']
     for field in required_fields:
-        if field not in prompt_data:
+        value = prompt_data.get(field)
+        if not isinstance(value, str) or not value.strip():
             errors.append(f"Campo obrigatório faltando: {field}")
 
-    system_prompt = prompt_data.get('system_prompt', '').strip()
-    if not system_prompt:
-        errors.append("system_prompt está vazio")
-
-    if 'TODO' in system_prompt:
+    system_prompt = prompt_data.get('system_prompt')
+    if isinstance(system_prompt, str) and 'TODO' in system_prompt:
         errors.append("system_prompt ainda contém TODOs")
 
     techniques = prompt_data.get('techniques_applied', [])
-    if len(techniques) < 2:
+    if not isinstance(techniques, list):
+        errors.append("techniques_applied deve ser uma lista")
+    elif len(techniques) < 2:
         errors.append(f"Mínimo de 2 técnicas requeridas, encontradas: {len(techniques)}")
 
     return (len(errors) == 0, errors)
@@ -215,7 +243,7 @@ def get_llm(model: Optional[str] = None, temperature: float = 0.0):
             api_key=api_key
         )
 
-    elif provider == 'google':
+    elif provider in {'google', 'gemini'}:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         api_key = os.getenv('GOOGLE_API_KEY')
@@ -225,16 +253,19 @@ def get_llm(model: Optional[str] = None, temperature: float = 0.0):
                 "Obtenha uma chave em: https://aistudio.google.com/app/apikey"
             )
 
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
-            google_api_key=api_key
-        )
+        model_options: dict[str, Any] = {
+            "model": model_name,
+            "google_api_key": api_key,
+        }
+        if _supports_sampling_parameters(model_name):
+            model_options["temperature"] = temperature
+
+        return ChatGoogleGenerativeAI(**model_options)
 
     else:
         raise ValueError(
             f"Provider '{provider}' não suportado.\n"
-            f"Use 'openai' ou 'google' na variável LLM_PROVIDER do .env"
+            f"Use 'openai', 'google' ou 'gemini' na variável LLM_PROVIDER do .env"
         )
 
 
